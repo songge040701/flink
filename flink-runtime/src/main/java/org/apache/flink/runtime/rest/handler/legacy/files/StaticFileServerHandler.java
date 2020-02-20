@@ -27,7 +27,7 @@ package org.apache.flink.runtime.rest.handler.legacy.files;
  *****************************************************************************/
 
 import org.apache.flink.api.common.time.Time;
-import org.apache.flink.runtime.rest.handler.RedirectHandler;
+import org.apache.flink.runtime.rest.handler.LeaderRetrievalHandler;
 import org.apache.flink.runtime.rest.handler.router.RoutedRequest;
 import org.apache.flink.runtime.rest.handler.util.HandlerUtils;
 import org.apache.flink.runtime.rest.handler.util.MimeTypes;
@@ -52,6 +52,8 @@ import org.apache.flink.shaded.netty4.io.netty.handler.codec.http.LastHttpConten
 import org.apache.flink.shaded.netty4.io.netty.handler.ssl.SslHandler;
 import org.apache.flink.shaded.netty4.io.netty.handler.stream.ChunkedFile;
 
+import org.slf4j.Logger;
+
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
@@ -68,8 +70,8 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.GregorianCalendar;
 import java.util.Locale;
+import java.util.Map;
 import java.util.TimeZone;
-import java.util.concurrent.CompletableFuture;
 
 import static org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpHeaders.Names.CACHE_CONTROL;
 import static org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpHeaders.Names.CONNECTION;
@@ -78,7 +80,9 @@ import static org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpHea
 import static org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpHeaders.Names.EXPIRES;
 import static org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpHeaders.Names.IF_MODIFIED_SINCE;
 import static org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpHeaders.Names.LAST_MODIFIED;
+import static org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpResponseStatus.FORBIDDEN;
 import static org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpResponseStatus.INTERNAL_SERVER_ERROR;
+import static org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpResponseStatus.METHOD_NOT_ALLOWED;
 import static org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpResponseStatus.NOT_FOUND;
 import static org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpResponseStatus.NOT_MODIFIED;
 import static org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpResponseStatus.OK;
@@ -93,7 +97,7 @@ import static org.apache.flink.util.Preconditions.checkNotNull;
  * example.</p>
  */
 @ChannelHandler.Sharable
-public class StaticFileServerHandler<T extends RestfulGateway> extends RedirectHandler<T> {
+public class StaticFileServerHandler<T extends RestfulGateway> extends LeaderRetrievalHandler<T> {
 
 	/** Timezone in which this server answers its "if-modified" requests. */
 	private static final TimeZone GMT_TIMEZONE = TimeZone.getTimeZone("GMT");
@@ -111,11 +115,10 @@ public class StaticFileServerHandler<T extends RestfulGateway> extends RedirectH
 
 	public StaticFileServerHandler(
 			GatewayRetriever<? extends T> retriever,
-			CompletableFuture<String> localJobManagerAddressFuture,
 			Time timeout,
 			File rootPath) throws IOException {
 
-		super(localJobManagerAddressFuture, retriever, timeout, Collections.emptyMap());
+		super(retriever, timeout, Collections.emptyMap());
 
 		this.rootPath = checkNotNull(rootPath).getCanonicalFile();
 	}
@@ -196,25 +199,7 @@ public class StaticFileServerHandler<T extends RestfulGateway> extends RedirectH
 			}
 		}
 
-		if (!file.exists() || file.isHidden() || file.isDirectory() || !file.isFile()) {
-			HandlerUtils.sendErrorResponse(
-				ctx,
-				request,
-				new ErrorResponseBody("File not found."),
-				NOT_FOUND,
-				responseHeaders);
-			return;
-		}
-
-		if (!file.getCanonicalFile().toPath().startsWith(rootPath.toPath())) {
-			HandlerUtils.sendErrorResponse(
-				ctx,
-				request,
-				new ErrorResponseBody("File not found."),
-				NOT_FOUND,
-				responseHeaders);
-			return;
-		}
+		checkFileValidity(file, rootPath, ctx, request, responseHeaders, logger);
 
 		// cache validation
 		final String ifModifiedSince = request.headers().get(IF_MODIFIED_SINCE);
@@ -246,6 +231,9 @@ public class StaticFileServerHandler<T extends RestfulGateway> extends RedirectH
 			raf = new RandomAccessFile(file, "r");
 		}
 		catch (FileNotFoundException e) {
+			if (logger.isDebugEnabled()) {
+				logger.debug("Could not find file {}.", file.getAbsolutePath());
+			}
 			HandlerUtils.sendErrorResponse(
 				ctx,
 				request,
@@ -375,5 +363,47 @@ public class StaticFileServerHandler<T extends RestfulGateway> extends RedirectH
 		String mimeType = MimeTypes.getMimeTypeForFileName(file.getName());
 		String mimeFinal = mimeType != null ? mimeType : MimeTypes.getDefaultMimeType();
 		response.headers().set(CONTENT_TYPE, mimeFinal);
+	}
+
+	public static void checkFileValidity(File file, File rootPath, ChannelHandlerContext ctx, HttpRequest request, Map<String, String> responseHeaders, Logger logger) throws IOException {
+		// this check must be done first to prevent probing for arbitrary files
+		if (!file.getCanonicalFile().toPath().startsWith(rootPath.toPath())) {
+			if (logger.isDebugEnabled()) {
+				logger.debug("Requested path {} points outside the root directory.", file.getAbsolutePath());
+			}
+			HandlerUtils.sendErrorResponse(
+				ctx,
+				request,
+				new ErrorResponseBody("Forbidden."),
+				FORBIDDEN,
+				responseHeaders);
+			return;
+		}
+
+		if (!file.exists() || file.isHidden()) {
+			if (logger.isDebugEnabled()) {
+				logger.debug("Requested path {} cannot be found.", file.getAbsolutePath());
+			}
+			HandlerUtils.sendErrorResponse(
+				ctx,
+				request,
+				new ErrorResponseBody("File not found."),
+				NOT_FOUND,
+				responseHeaders);
+			return;
+		}
+
+		if (file.isDirectory() || !file.isFile()) {
+			if (logger.isDebugEnabled()) {
+				logger.debug("Requested path {} does not point to a file.", file.getAbsolutePath());
+			}
+			HandlerUtils.sendErrorResponse(
+				ctx,
+				request,
+				new ErrorResponseBody("File not found."),
+				METHOD_NOT_ALLOWED,
+				responseHeaders);
+			return;
+		}
 	}
 }

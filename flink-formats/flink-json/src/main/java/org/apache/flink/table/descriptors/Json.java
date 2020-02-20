@@ -66,7 +66,11 @@ public class Json extends FormatDescriptor {
 	 * <p>The schema might be nested.
 	 *
 	 * @param jsonSchema JSON schema
+	 * @deprecated {@link Json} supports derive schema from table schema by default,
+	 *             it is no longer necessary to explicitly declare the format schema.
+	 *             This method will be removed in the future.
 	 */
+	@Deprecated
 	public Json jsonSchema(String jsonSchema) {
 		Preconditions.checkNotNull(jsonSchema);
 		this.jsonSchema = jsonSchema;
@@ -83,7 +87,11 @@ public class Json extends FormatDescriptor {
 	 * <p>The schema might be nested.
 	 *
 	 * @param schemaType type information that describes the schema
+	 * @deprecated {@link Json} supports derive schema from table schema by default,
+	 *             it is no longer necessary to explicitly declare the format schema.
+	 *             This method will be removed in the future.
 	 */
+	@Deprecated
 	public Json schema(TypeInformation<Row> schemaType) {
 		Preconditions.checkNotNull(schemaType);
 		this.schema = TypeStringUtils.writeTypeInfo(schemaType);
@@ -93,14 +101,18 @@ public class Json extends FormatDescriptor {
 	}
 
 	/**
-	 * Derives the format schema from the table's schema described using {@link Schema}.
+	 * Derives the format schema from the table's schema described.
 	 *
 	 * <p>This allows for defining schema information only once.
 	 *
-	 * <p>The names, types, and field order of the format are determined by the table's
+	 * <p>The names, types, and fields' order of the format are determined by the table's
 	 * schema. Time attributes are ignored if their origin is not a field. A "from" definition
 	 * is interpreted as a field renaming in the format.
+	 *
+	 * @deprecated Derivation format schema from table's schema is the default behavior now.
+	 * 	So there is no need to explicitly declare to derive schema.
 	 */
+	@Deprecated
 	public Json deriveSchema() {
 		this.deriveSchema = true;
 		this.schema = null;
